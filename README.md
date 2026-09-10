@@ -93,24 +93,30 @@ Key	Note	Frequency
 The Python program generates piano-style audio for these notes and can
 also send the selected note information to the ESP32.
 
-🔧 Hardware
-Required Components
-ESP32 development board
-Buzzer
-4 LEDs
-Current-limiting resistors
-Breadboard
-Jumper wires
-USB cable
-Computer/laptop
-Webcam
-🔌 ESP32 Pin Configuration
-Component	ESP32 GPIO
-Buzzer	GPIO 5
-LED 1	GPIO 12
-LED 2	GPIO 13
-LED 3	GPIO 14
-LED 4	GPIO 15
+# 🔌 Hardware Connections
+
+The ESP32 controls four LEDs based on commands received from the Python
+program through serial communication.
+
+## ESP32 Pin Configuration
+
+| Component | ESP32 GPIO | Function |
+|-----------|------------|----------|
+| LED 1 | GPIO 25 | Piano Key Group 1 |
+| LED 2 | GPIO 26 | Piano Key Group 2 |
+| LED 3 | GPIO 27 | Piano Key Group 3 |
+| LED 4 | GPIO 32 | Piano Key Group 4 |
+
+## LED Wiring
+
+Each LED should be connected with a current-limiting resistor
+(typically 220Ω–330Ω).
+
+```text
+ESP32 GPIO 25 ── 220Ω ──► LED 1 ──► GND
+ESP32 GPIO 26 ── 220Ω ──► LED 2 ──► GND
+ESP32 GPIO 27 ── 220Ω ──► LED 3 ──► GND
+ESP32 GPIO 32 ── 220Ω ──► LED 4 ──► GND
 
 The eight piano notes are divided across four LEDs, with each LED
 representing two adjacent piano notes.
