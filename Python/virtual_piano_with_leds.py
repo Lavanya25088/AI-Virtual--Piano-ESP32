@@ -6,238 +6,476 @@ import os
 import pygame
 import time
 import serial
-import serial.tools.list_ports
 
-# ─────────────────────────────────────────
-# ESP32 CONNECTION (optional)
-# ─────────────────────────────────────────
-def find_esp32():
-    ports = serial.tools.list_ports.comports()
-    for p in ports:
-        desc = p.description.upper()
-        if any(x in desc for x in ["CP210", "CH340", "CH341", "UART", "USB SERIAL"]):
-            return p.device
-    return None
 
-esp32 = None
-port  = find_esp32()
-if port:
-    try:
-        esp32 = serial.Serial(port, 9600, timeout=1)
-        time.sleep(1.5)
-        print(f"ESP32 connected on {port}")
-    except:
-        print("ESP32 found but could not open. Continuing without buzzer and LED.")
-else:
-    print("ESP32 not detected. Running laptop-only mode.")
+# ============================================================
+# ESP32 SETTINGS
+# ============================================================
 
-SOUND_MODE = "both" if esp32 else "laptop"
+ESP32_PORT = "COMS"
+BAUD_RATE = 115200
 
-# ─────────────────────────────────────────
-# LED MAPPING (8 notes → 4 LEDs)
-# ─────────────────────────────────────────
-def get_led_for_note(note_index):
-    """Maps 8 notes to 4 LEDs (pairs of 2)"""
-    return note_index // 2  # 0-7 → 0-3
-
-# ─────────────────────────────────────────
-# GENERATE PIANO NOTE WAV FILES
-# ─────────────────────────────────────────
-def generate_piano_note(filename, frequency, duration=1.5, sample_rate=44100):
-    if os.path.exists(filename):
-        return
-    t = np.linspace(0, duration, int(sample_rate * duration))
-    wave_data = (
-        1.0  * np.sin(2 * np.pi * frequency * 1 * t) +
-        0.5  * np.sin(2 * np.pi * frequency * 2 * t) +
-        0.25 * np.sin(2 * np.pi * frequency * 3 * t) +
-        0.12 * np.sin(2 * np.pi * frequency * 4 * t) +
-        0.06 * np.sin(2 * np.pi * frequency * 5 * t)
+try:
+    esp32 = serial.Serial(
+        ESP32_PORT,
+        BAUD_RATE,
+        timeout=1
     )
-    envelope  = np.exp(-3 * t)
-    wave_data = wave_data * envelope
-    wave_data = wave_data / np.max(np.abs(wave_data))
-    wave_data = (wave_data * 32767).astype(np.int16)
-    with wave.open(filename, 'w') as f:
-        f.setnchannels(1)
-        f.setsampwidth(2)
-        f.setframerate(sample_rate)
-        f.writeframes(wave_data.tobytes())
 
-FREQUENCIES = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25]
-NOTE_FILES  = [f"note_{i}.wav" for i in range(8)]
+    time.sleep(2)
+    print("ESP32 connected!")
 
-print("Generating piano notes...")
-for i, freq in enumerate(FREQUENCIES):
-    generate_piano_note(NOTE_FILES[i], freq)
-print("Done!")
+except serial.SerialException as e:
+    print("WARNING: ESP32 not connected.")
+    print(e)
+    esp32 = None
 
-# ─────────────────────────────────────────
-# PYGAME INIT
-# ─────────────────────────────────────────
-pygame.mixer.init(frequency=44100, size=-16, channels=1, buffer=512)
+
+# ============================================================
+# GENERATE PIANO NOTES
+# ============================================================
+
+sample_rate = 44100
+
+frequencies = [
+    261.63,   # C
+    293.66,   # D
+    329.63,   # E
+    349.23,   # F
+    392.00,   # G
+    440.00,   # A
+    493.88,   # B
+    523.25    # C2
+]
+
+note_names = ["C", "D", "E", "F", "G", "A", "B", "C2"]
+
+note_files = []
+
+
+for i, freq in enumerate(frequencies):
+
+    filename = f"note_{i}.wav"
+
+    duration = 1.0
+
+    t = np.linspace(
+        0,
+        duration,
+        int(sample_rate * duration),
+        endpoint=False
+    )
+
+    # Piano-like sound using harmonics
+    sound = (
+        np.sin(2 * np.pi * freq * t)
+        + 0.5 * np.sin(2 * np.pi * 2 * freq * t)
+        + 0.25 * np.sin(2 * np.pi * 3 * freq * t)
+        + 0.1 * np.sin(2 * np.pi * 4 * freq * t)
+    )
+
+    # Exponential decay
+    envelope = np.exp(-3 * t)
+
+    sound = sound * envelope
+
+    # Convert to 16-bit audio
+    sound = sound / np.max(np.abs(sound))
+    sound = (sound * 32767).astype(np.int16)
+
+    with wave.open(filename, "w") as wf:
+
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(sound.tobytes())
+
+    note_files.append(filename)
+
+
+# ============================================================
+# PYGAME AUDIO
+# ============================================================
+
+pygame.mixer.init(
+    frequency=44100,
+    size=-16,
+    channels=1,
+    buffer=512
+)
+
 pygame.mixer.set_num_channels(8)
-sounds   = [pygame.mixer.Sound(f) for f in NOTE_FILES]
-channels = [pygame.mixer.Channel(i) for i in range(8)]
 
-# ─────────────────────────────────────────
-# MEDIAPIPE INIT
-# ─────────────────────────────────────────
+sounds = [
+    pygame.mixer.Sound(file)
+    for file in note_files
+]
+
+
+# ============================================================
+# MEDIAPIPE HANDS
+# ============================================================
+
 mp_hands = mp.solutions.hands
-hands    = mp_hands.Hands(
+mp_draw = mp.solutions.drawing_utils
+
+hands = mp_hands.Hands(
     max_num_hands=1,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.7
 )
-mp_draw = mp.solutions.drawing_utils
 
-# ─────────────────────────────────────────
-# WEBCAM + KEY LAYOUT
-# ─────────────────────────────────────────
+
+# ============================================================
+# WEBCAM
+# ============================================================
+
 cap = cv2.VideoCapture(0)
-ret, test_frame = cap.read()
-FRAME_H, FRAME_W = test_frame.shape[:2]
 
-NUM_KEYS    = 8
-GAP         = 6
-KEY_H       = 160
-KEY_W       = (FRAME_W - GAP * (NUM_KEYS + 1)) // NUM_KEYS
-KEY_Y       = FRAME_H - KEY_H - 10
-total_width = NUM_KEYS * KEY_W + (NUM_KEYS - 1) * GAP
-START_X     = (FRAME_W - total_width) // 2
 
-NOTE_NAMES = ['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C2']
+# ============================================================
+# PIANO SETTINGS
+# ============================================================
 
-keys = []
-for i in range(NUM_KEYS):
-    x1 = START_X + i * (KEY_W + GAP)
-    x2 = x1 + KEY_W
-    keys.append((x1, KEY_Y, x2, KEY_Y + KEY_H))
+num_keys = 8
 
-# ─────────────────────────────────────────
-# STATE
-# ─────────────────────────────────────────
-last_pressed      = -1
-currently_playing = -1
-last_press_time   = 0
-COOLDOWN          = 0.4
+last_key = -1
 
-# ─────────────────────────────────────────
+last_play_time = 0
+
+COOLDOWN = 0.4
+
+
+# ============================================================
+# 4 LED CONTROL
+# ============================================================
+
+last_led_command = None
+
+
+def control_led(key):
+
+    global last_led_command
+
+    if esp32 is None:
+        return
+
+    # No key pressed
+    if key == -1:
+
+        command = '0'
+
+    # C -> LED1
+    elif key == 0:
+
+        command = '1'
+
+    # D -> LED2
+    elif key == 1:
+
+        command = '2'
+
+    # E -> LED3
+    elif key == 2:
+
+        command = '3'
+
+    # F -> LED4
+    elif key == 3:
+
+        command = '4'
+
+    # G -> LED1
+    elif key == 4:
+
+        command = '1'
+
+    # A -> LED2
+    elif key == 5:
+
+        command = '2'
+
+    # B -> LED3
+    elif key == 6:
+
+        command = '3'
+
+    # C2 -> LED4
+    elif key == 7:
+
+        command = '4'
+
+    # Send command only when LED state changes
+    if command != last_led_command:
+
+        esp32.write(command.encode())
+
+        last_led_command = command
+
+
+# ============================================================
 # MAIN LOOP
-# ─────────────────────────────────────────
+# ============================================================
+
 while True:
-    ret, frame = cap.read()
-    if not ret:
+
+    success, frame = cap.read()
+
+    if not success:
         break
 
-    frame   = cv2.flip(frame, 1)
-    rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb)
+    # Mirror camera
+    frame = cv2.flip(frame, 1)
 
-    finger_x, finger_y = -1, -1
+    height, width, _ = frame.shape
 
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            tip      = hand_landmarks.landmark[8]
-            h, w, _  = frame.shape
-            finger_x = int(tip.x * w)
-            finger_y = int(tip.y * h)
-            cv2.circle(frame, (finger_x, finger_y), 12, (0, 255, 0), -1)
+    # Convert BGR -> RGB
+    rgb_frame = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
 
-    # ── draw keys + detect press ──
+    # MediaPipe processing
+    result = hands.process(rgb_frame)
+
     pressed_key = -1
-    for i, (x1, y1, x2, y2) in enumerate(keys):
-        touching = x1 < finger_x < x2 and y1 < finger_y < y2
-        color    = (0, 255, 255) if touching else (255, 255, 255)
-        if touching:
-            pressed_key = i
 
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
-        cv2.addWeighted(overlay, 0.25, frame, 0.75, 0, frame)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 255), 2)
-        cv2.putText(frame, NOTE_NAMES[i],
-                    (x1 + KEY_W // 2 - 10, y2 - 15),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
-    # ── sound + buzzer + LED logic ──
-    now = time.time()
+    # ========================================================
+    # HAND DETECTION
+    # ========================================================
 
-    if pressed_key == -1:
-        last_pressed = -1
+    if result.multi_hand_landmarks:
 
-    elif pressed_key != last_pressed:
-        if currently_playing != -1:
-            channels[currently_playing].stop()
+        for hand_landmarks in result.multi_hand_landmarks:
 
-        if SOUND_MODE in ("laptop", "both"):
-            channels[pressed_key].play(sounds[pressed_key])
-            currently_playing = pressed_key
+            mp_draw.draw_landmarks(
+                frame,
+                hand_landmarks,
+                mp_hands.HAND_CONNECTIONS
+            )
 
-        if SOUND_MODE in ("buzzer", "both") and esp32:
-            try:
-                led_num = get_led_for_note(pressed_key)
-                esp32.write(f"NOTE:{pressed_key},LED:{led_num}\n".encode())
-            except:
-                pass
+            # Index fingertip = landmark 8
+            fingertip = hand_landmarks.landmark[8]
 
-        last_pressed    = pressed_key
-        last_press_time = now
+            x = int(fingertip.x * width)
+            y = int(fingertip.y * height)
 
-    elif (now - last_press_time) > COOLDOWN:
-        if SOUND_MODE in ("laptop", "both"):
-            channels[pressed_key].stop()
-            channels[pressed_key].play(sounds[pressed_key])
 
-        if SOUND_MODE in ("buzzer", "both") and esp32:
-            try:
-                led_num = get_led_for_note(pressed_key)
-                esp32.write(f"NOTE:{pressed_key},LED:{led_num}\n".encode())
-            except:
-                pass
+            # Draw fingertip
+            cv2.circle(
+                frame,
+                (x, y),
+                10,
+                (0, 255, 0),
+                -1
+            )
 
-        last_press_time = now
 
-    # ── UI ──
-    mode_colors = {
-        "laptop": (100, 200, 255),
-        "buzzer": (100, 255, 150),
-        "both":   (255, 200, 50)
-    }
-    cv2.putText(frame, "AI Virtual Piano", (10, 40),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 200, 255), 3)
-    cv2.putText(frame, "Point index finger at a key", (10, 75),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 1)
-    cv2.putText(frame, f"MODE: {SOUND_MODE.upper()}   (1=Laptop  2=Buzzer  3=Both)",
-                (10, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                mode_colors[SOUND_MODE], 2)
-    if not esp32:
-        cv2.putText(frame, "ESP32 not connected", (10, 140),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 80, 255), 1)
+            # =================================================
+            # PIANO AREA
+            # =================================================
 
-    cv2.imshow("AI Virtual Piano", frame)
+            piano_top = int(height * 0.65)
 
-    key_pressed = cv2.waitKey(1)
-    if key_pressed == ord('1'):
-        SOUND_MODE = "laptop"
-        print("Mode: Laptop only")
-    elif key_pressed == ord('2'):
-        if esp32:
-            SOUND_MODE = "buzzer"
-            print("Mode: Buzzer only")
-        else:
-            print("ESP32 not connected — staying on laptop mode")
-    elif key_pressed == ord('3'):
-        if esp32:
-            SOUND_MODE = "both"
-            print("Mode: Both")
-        else:
-            print("ESP32 not connected — staying on laptop mode")
-    elif key_pressed == 27:
+            piano_bottom = height
+
+            key_width = width // num_keys
+
+
+            if piano_top <= y <= piano_bottom:
+
+                key = x // key_width
+
+                if 0 <= key < num_keys:
+
+                    pressed_key = key
+
+
+    # ========================================================
+    # CONTROL 4 LEDs
+    # ========================================================
+
+    control_led(pressed_key)
+
+
+    # ========================================================
+    # PLAY SOUND
+    # ========================================================
+
+    current_time = time.time()
+
+    if pressed_key != -1:
+
+        if (
+            pressed_key != last_key
+            or current_time - last_play_time > COOLDOWN
+        ):
+
+            sounds[pressed_key].play()
+
+            last_play_time = current_time
+
+            last_key = pressed_key
+
+
+    else:
+
+        last_key = -1
+
+
+    # ========================================================
+    # DRAW PIANO KEYS
+    # ========================================================
+
+    piano_top = int(height * 0.65)
+
+    key_width = width // num_keys
+
+
+    overlay = frame.copy()
+
+
+    for i in range(num_keys):
+
+        x1 = i * key_width
+
+        x2 = (i + 1) * key_width
+
+
+        if i == pressed_key:
+
+            cv2.rectangle(
+                overlay,
+                (x1, piano_top),
+                (x2, height),
+                (0, 255, 0),
+                -1
+            )
+
+
+        cv2.rectangle(
+            frame,
+            (x1, piano_top),
+            (x2, height),
+            (255, 255, 255),
+            2
+        )
+
+
+        cv2.putText(
+            frame,
+            note_names[i],
+            (x1 + 20, height - 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 255),
+            2
+        )
+
+
+    # Transparent key highlight
+    frame = cv2.addWeighted(
+        overlay,
+        0.25,
+        frame,
+        0.75,
+        0
+    )
+
+
+    # ========================================================
+    # TITLE
+    # ========================================================
+
+    cv2.putText(
+        frame,
+        "AI Virtual Piano",
+        (30, 45),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (255, 255, 255),
+        2
+    )
+
+
+    cv2.putText(
+        frame,
+        "ESP32 + 4 LED Mode",
+        (30, 80),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2
+    )
+
+
+    cv2.putText(
+        frame,
+        "Point index finger at a key",
+        (30, 115),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2
+    )
+
+
+    # ========================================================
+    # SHOW
+    # ========================================================
+
+    cv2.imshow(
+        "AI Virtual Piano",
+        frame
+    )
+
+
+    # ========================================================
+    # EXIT
+    # ========================================================
+
+    key_pressed = cv2.waitKey(1) & 0xFF
+
+    if key_pressed == ord('q') or key_pressed == 27:
+
         break
+
+
+# ============================================================
+# CLEANUP
+# ============================================================
 
 cap.release()
+
 cv2.destroyAllWindows()
+
+pygame.mixer.quit()
+
+
 if esp32:
-    esp32.close()
+
+    try:
+
+        # Turn all LEDs OFF
+        esp32.write(b'0')
+
+        time.sleep(0.1)
+
+        esp32.close()
+
+    except:
+
+        pass
+
+
+# Delete generated WAV files
+for file in note_files:
+
+    try:
+
+        os.remove(file)
+
+    except:
+
+        pass
